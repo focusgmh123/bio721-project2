@@ -1,0 +1,347 @@
+---
+title: "Bio721 Project 2"
+author: "Minghui Gao"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 7,
+  fig.height = 5,
+  dpi = 300
+)
+
+source("R/process_air_quality.R")
+
+dir.create("output", showWarnings = FALSE)
+```
+
+## Purpose and data
+
+This project processes air quality measurements from the EPA monitor
+at RDU airport and explores patterns in CO, PM2.5, and ozone.
+The data cover 2018, 2019, and January-April 2020.
+This analysis describes pollution patterns; it does not estimate
+associations with sickle cell disease outcomes.
+
+## Data processing
+
+Exact duplicate rows were removed before replacing negative
+measurements with zero and calculating daily averages.
+This order prevents duplicate records from receiving extra weight
+and avoids averaging negative measurement errors with valid values.
+Missing values were retained, and absent dates within each file's
+observed period were added with missing concentrations.
+
+```{r process-data}
+aq_2018 <- process_air_quality("data/AQ_2018.csv")
+aq_2019 <- process_air_quality("data/AQ_2019.csv")
+aq_2020 <- process_air_quality("data/AQ_2020.csv")
+
+aq_all <- bind_rows(aq_2018, aq_2019, aq_2020) |>
+  mutate(
+    year = as.integer(format(date, "%Y")),
+    month = as.integer(format(date, "%m"))
+  )
+
+stopifnot(
+  nrow(aq_all) == 851,
+  !anyDuplicated(aq_all$date),
+  all(aq_all$CO >= 0, na.rm = TRUE),
+  all(aq_all$PM25 >= 0, na.rm = TRUE),
+  all(aq_all$O3 >= 0, na.rm = TRUE)
+)
+
+write.csv(
+  aq_all,
+  "output/daily_clean.csv",
+  row.names = FALSE,
+  na = ""
+)
+```
+
+The processed dataset contains `r nrow(aq_all)` calendar days,
+with one row per date. CO and ozone are expressed in ppm,
+and PM2.5 is expressed in micrograms per cubic meter.
+
+## Annual concentration ranges
+
+These tables show minima and maxima of the cleaned daily
+concentrations, excluding missing measurements.
+The 2020 table covers January-April only.
+
+```{r annual-ranges, results='asis'}
+annual_ranges <- aq_all |>
+  select(year, CO, PM25, O3) |>
+  pivot_longer(
+    cols = c(CO, PM25, O3),
+    names_to = "pollutant",
+    values_to = "concentration"
+  ) |>
+  group_by(year, pollutant) |>
+  summarise(
+    minimum = min(concentration, na.rm = TRUE),
+    maximum = max(concentration, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    pollutant = factor(
+      pollutant,
+      levels = c("CO", "PM25", "O3"),
+      labels = c(
+        "CO (ppm)",
+        "PM2.5 (ug/m3)",
+        "O3 (ppm)"
+      )
+    )
+  ) |>
+  arrange(year, pollutant)
+
+for (y in 2018:2020) {
+
+  tab <- annual_ranges |>
+    filter(year == y) |>
+    transmute(
+      Pollutant = pollutant,
+      Minimum = sprintf("%.3f", minimum),
+      Maximum = sprintf("%.3f", maximum)
+    )
+
+  cat("\n\n")
+
+  print(
+    knitr::kable(
+      tab,
+      caption = paste(y, "daily concentration ranges"),
+      align = c("l", "r", "r")
+    )
+  )
+
+  cat("\n\n")
+}
+
+write.csv(
+  annual_ranges,
+  "output/annual_ranges.csv",
+  row.names = FALSE
+)
+```
+
+## Monthly CO and ozone
+
+Daily values for each calendar month were pooled across the
+available years. Each confidence interval was calculated as
+the mean plus or minus 1.96 times the standard error.
+The sample size counts non-missing daily concentrations separately
+for each pollutant.
+
+```{r monthly-summary}
+monthly_summary <- aq_all |>
+  select(month, CO, O3) |>
+  pivot_longer(
+    cols = c(CO, O3),
+    names_to = "pollutant",
+    values_to = "concentration"
+  ) |>
+  group_by(month, pollutant) |>
+  summarise(
+    n = sum(!is.na(concentration)),
+    mean_concentration = mean(concentration, na.rm = TRUE),
+    sd_concentration = sd(concentration, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    se = sd_concentration / sqrt(n),
+    lower = mean_concentration - 1.96 * se,
+    upper = mean_concentration + 1.96 * se,
+    panel = factor(
+      pollutant,
+      levels = c("CO", "O3"),
+      labels = c("CO (ppm)", "O3 (ppm)")
+    )
+  )
+
+write.csv(
+  monthly_summary,
+  "output/monthly_CO_O3.csv",
+  row.names = FALSE
+)
+```
+
+```{r plot-co-ozone, fig.height=5.5}
+plot1 <- ggplot(
+  monthly_summary,
+  aes(
+    x = month,
+    y = mean_concentration,
+    color = pollutant
+  )
+) +
+  geom_errorbar(
+    aes(ymin = lower, ymax = upper),
+    width = 0.15
+  ) +
+  geom_point(size = 2) +
+  facet_wrap(
+    ~ panel,
+    ncol = 1,
+    scales = "free_y"
+  ) +
+  scale_x_continuous(
+    breaks = 1:12,
+    labels = month.abb
+  ) +
+  scale_color_manual(
+    values = c(
+      "CO" = "#0072B2",
+      "O3" = "#D55E00"
+    )
+  ) +
+  labs(
+    title = "Monthly CO and ozone concentrations",
+    subtitle = "Pooled daily means with 95% confidence intervals",
+    x = "Month",
+    y = "Concentration",
+    caption = "Jan-Apr: three years; May-Dec: two years."
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank()
+  )
+
+print(plot1)
+
+ggsave(
+  "output/CO_O3_monthly.png",
+  plot1,
+  width = 7,
+  height = 5.5,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+Separate panels with independent y-axis scales make both pollutants'
+patterns readable while retaining their original ppm units.
+The vertical heights should not be compared directly between panels.
+
+## Monthly PM2.5 by year
+
+```{r pm25-summary}
+pm25_summary <- aq_all |>
+  group_by(year, month) |>
+  summarise(
+    n = sum(!is.na(PM25)),
+    mean_PM25 = mean(PM25, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(year = factor(year))
+
+write.csv(
+  pm25_summary,
+  "output/monthly_PM25.csv",
+  row.names = FALSE
+)
+```
+
+```{r plot-pm25}
+plot2 <- ggplot(
+  pm25_summary,
+  aes(
+    x = month,
+    y = mean_PM25,
+    color = year,
+    group = year
+  )
+) +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_x_continuous(
+    breaks = 1:12,
+    labels = month.abb
+  ) +
+  scale_color_manual(
+    values = c(
+      "2018" = "#0072B2",
+      "2019" = "#D55E00",
+      "2020" = "#009E73"
+    )
+  ) +
+  labs(
+    title = "Monthly mean PM2.5 concentrations by year",
+    x = "Month",
+    y = "PM2.5 (ug/m3)",
+    color = "Year",
+    caption = "2020 data end in April."
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+print(plot2)
+
+ggsave(
+  "output/PM25_monthly.png",
+  plot2,
+  width = 7,
+  height = 5,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+Lines with points show the sequence of monthly means and make
+comparisons between years clear without overlapping daily observations.
+
+## Interpretation
+
+CO concentrations are highest in winter, while ozone concentrations
+are generally higher in spring and summer.
+January-February 2020 PM2.5 monthly means are lower than those in
+2018 and 2019, although 2020 has the largest daily PM2.5 maximum
+of 31.200 ug/m3.
+Interpretation should account for missing observations and the fact
+that January-April include three years of data, whereas May-December
+include only two.
+
+## AI use statement
+
+I used ChatGPT to help check my code, write code comments, and review the final results.
+
+## Software information
+
+```{r software}
+knitr::kable(
+  data.frame(
+    Software = c(
+      "R", "dplyr", "tidyr",
+      "ggplot2", "knitr", "rmarkdown"
+    ),
+    Version = c(
+      as.character(getRversion()),
+      as.character(packageVersion("dplyr")),
+      as.character(packageVersion("tidyr")),
+      as.character(packageVersion("ggplot2")),
+      as.character(packageVersion("knitr")),
+      as.character(packageVersion("rmarkdown"))
+    )
+  )
+)
+
+capture.output(
+  sessionInfo(),
+  file = "output/session_info.txt"
+)
+```
