@@ -4,6 +4,7 @@ author: "Minghui Gao"
 date: "`r Sys.Date()`"
 output: word_document
 ---
+GitHub repository: [bio721-project 2](https://github.com/focusgmh123/bio721-project2.git)
 
 ```{r setup, include=FALSE}
 library(dplyr)
